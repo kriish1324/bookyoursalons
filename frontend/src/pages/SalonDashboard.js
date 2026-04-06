@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { auth } from '../firebase';
+import { auth, db } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
+import { collection, query, where, onSnapshot, doc, updateDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import axios from 'axios';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -103,6 +104,54 @@ function SalonDashboard() {
       checkAutoClose();
     }, 30000);
     return () => clearInterval(interval);
+  }, [salon?.salon_id]);
+
+  // REAL-TIME Firestore Listener for Bookings
+  useEffect(() => {
+    if (!salon?.salon_id) return;
+
+    const bookingsRef = collection(db, 'bookings');
+    const q = query(bookingsRef, where('salonId', '==', salon.salon_id));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const realtimeBookings = [];
+      snapshot.forEach((doc) => {
+        realtimeBookings.push({ id: doc.id, ...doc.data() });
+      });
+
+      // Update all bookings
+      setBookings(realtimeBookings);
+
+      // Filter pending bookings
+      const pending = realtimeBookings.filter(b => b.status === 'pending');
+      setPendingBookings(pending);
+
+      // Show toast notification for new bookings
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'added') {
+          const booking = change.doc.data();
+          if (booking.status === 'pending') {
+            toast.info(`New Booking from ${booking.customerName || 'Customer'}`, {
+              description: `${booking.serviceName} at ${booking.slotTime}`,
+              duration: 5000
+            });
+          }
+        } else if (change.type === 'modified') {
+          const booking = change.doc.data();
+          if (booking.status === 'confirmed') {
+            toast.success('Booking Confirmed');
+          } else if (booking.status === 'completed') {
+            toast.success('Booking Completed');
+          }
+        }
+      });
+    }, (error) => {
+      console.error('Firestore listener error:', error);
+      // Fallback to API polling if Firestore fails
+      fetchPendingBookings();
+    });
+
+    return () => unsubscribe();
   }, [salon?.salon_id]);
 
   const fetchPendingBookings = async () => {
@@ -338,21 +387,63 @@ function SalonDashboard() {
 
   const handleApproveBooking = async (bookingId) => {
     try {
+      // Update MongoDB via API
       await axios.post(`${API}/booking/${bookingId}/approve`);
-      toast.success('Booking confirmed!');
+      
+      // Update Firestore for real-time sync
+      const bookingRef = doc(db, 'bookings', bookingId);
+      await updateDoc(bookingRef, {
+        status: 'confirmed',
+        confirmedAt: serverTimestamp()
+      });
+      
+      toast.success('Booking Confirmed!');
       fetchSalonData();
     } catch (error) {
+      console.error('Approve error:', error);
       toast.error(error.response?.data?.detail || 'Failed to approve booking');
     }
   };
 
   const handleRejectBooking = async (bookingId, reason = 'Salon unavailable') => {
     try {
+      // Update MongoDB via API
       await axios.post(`${API}/booking/${bookingId}/reject?reason=${encodeURIComponent(reason)}`);
-      toast.success('Booking rejected');
+      
+      // Update Firestore for real-time sync
+      const bookingRef = doc(db, 'bookings', bookingId);
+      await updateDoc(bookingRef, {
+        status: 'rejected',
+        rejectionReason: reason,
+        rejectedAt: serverTimestamp()
+      });
+      
+      toast.success('Booking Rejected');
       fetchSalonData();
     } catch (error) {
+      console.error('Reject error:', error);
       toast.error(error.response?.data?.detail || 'Failed to reject booking');
+    }
+  };
+
+  // NEW: Complete booking function
+  const handleCompleteBooking = async (bookingId) => {
+    try {
+      // Update MongoDB via API
+      await axios.patch(`${API}/admin/booking/${bookingId}/status?status=completed`);
+      
+      // Update Firestore for real-time sync
+      const bookingRef = doc(db, 'bookings', bookingId);
+      await updateDoc(bookingRef, {
+        status: 'completed',
+        completedAt: serverTimestamp()
+      });
+      
+      toast.success('Service Completed!');
+      fetchSalonData();
+    } catch (error) {
+      console.error('Complete error:', error);
+      toast.error('Failed to mark as completed');
     }
   };
 
@@ -1020,7 +1111,7 @@ function SalonDashboard() {
                   {todayBookings.length === 0 ? (
                     <p className="text-center text-gray-500 py-8 text-sm">No bookings for today</p>
                   ) : (
-                    todayBookings.map((booking) => <BookingCard key={booking.booking_id} booking={booking} />)
+                    todayBookings.map((booking) => <BookingCard key={booking.booking_id} booking={booking} onComplete={handleCompleteBooking} />)
                   )}
                 </TabsContent>
 
@@ -1028,7 +1119,7 @@ function SalonDashboard() {
                   {upcomingBookings.length === 0 ? (
                     <p className="text-center text-gray-500 py-8 text-sm">No upcoming bookings</p>
                   ) : (
-                    upcomingBookings.map((booking) => <BookingCard key={booking.booking_id} booking={booking} />)
+                    upcomingBookings.map((booking) => <BookingCard key={booking.booking_id} booking={booking} onComplete={handleCompleteBooking} />)
                   )}
                 </TabsContent>
 
@@ -1036,7 +1127,7 @@ function SalonDashboard() {
                   {bookings.length === 0 ? (
                     <p className="text-center text-gray-500 py-8 text-sm">No bookings yet</p>
                   ) : (
-                    bookings.slice(0, 20).map((booking) => <BookingCard key={booking.booking_id} booking={booking} />)
+                    bookings.slice(0, 20).map((booking) => <BookingCard key={booking.booking_id} booking={booking} onComplete={handleCompleteBooking} />)
                   )}
                 </TabsContent>
               </Tabs>
@@ -1544,30 +1635,85 @@ function SalonDashboard() {
   );
 }
 
-function BookingCard({ booking }) {
+function BookingCard({ booking, onComplete }) {
+  // Color-coded status badges
+  const getStatusStyles = (status) => {
+    switch (status) {
+      case 'pending':
+        return 'bg-yellow-100 text-yellow-700 border-yellow-300';
+      case 'confirmed':
+        return 'bg-green-100 text-green-700 border-green-300';
+      case 'completed':
+        return 'bg-gray-100 text-gray-700 border-gray-300';
+      case 'cancelled':
+      case 'rejected':
+        return 'bg-red-100 text-red-700 border-red-300';
+      default:
+        return 'bg-blue-100 text-blue-700 border-blue-300';
+    }
+  };
+
   return (
-    <Card className="p-3" data-testid={`booking-card-${booking.booking_id}`}>
-      <div className="flex justify-between items-start">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <User className="w-3 h-3 text-gray-500" />
-            <p className="font-medium text-sm">{booking.customer_name}</p>
+    <Card 
+      className="overflow-hidden shadow-sm hover:shadow-md transition-all border-l-4" 
+      style={{ borderLeftColor: 
+        booking.status === 'pending' ? '#facc15' : 
+        booking.status === 'confirmed' ? '#22c55e' : 
+        booking.status === 'completed' ? '#9ca3af' : '#ef4444' 
+      }}
+      data-testid={`booking-card-${booking.booking_id}`}
+    >
+      <CardContent className="p-4">
+        <div className="flex justify-between items-start gap-3">
+          <div className="flex-1 space-y-2">
+            {/* Customer Info */}
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-purple-100 rounded-full flex items-center justify-center">
+                <User className="w-4 h-4 text-purple-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-sm">{booking.customerName || booking.customer_name || 'Customer'}</p>
+                <p className="text-xs text-gray-500 flex items-center gap-1">
+                  <Phone className="w-3 h-3" />
+                  {booking.customerPhone || booking.customer_phone || 'N/A'}
+                </p>
+              </div>
+            </div>
+
+            {/* Service Info */}
+            <div className="bg-gray-50 rounded-lg p-2">
+              <p className="text-sm font-medium text-gray-800">{booking.serviceName || booking.service_name}</p>
+              <div className="flex items-center justify-between mt-1">
+                <p className="text-xs text-gray-600 flex items-center gap-1">
+                  <Calendar className="w-3 h-3" />
+                  {booking.date || booking.booking_date} at {booking.slotTime || booking.slot_time}
+                </p>
+                <p className="text-sm font-bold text-green-600">₹{booking.servicePrice || booking.service_price}</p>
+              </div>
+            </div>
           </div>
-          <p className="text-xs text-gray-600">{booking.service_name}</p>
-          <p className="text-xs text-gray-500">{booking.booking_date} at {booking.slot_time}</p>
-          <p className="text-xs font-medium text-green-600">₹{booking.service_price}</p>
+
+          {/* Status and Actions */}
+          <div className="flex flex-col items-end gap-2">
+            <span className={`text-xs font-medium px-3 py-1 rounded-full border ${getStatusStyles(booking.status)}`}>
+              {booking.status?.toUpperCase() || 'PENDING'}
+            </span>
+
+            {/* Complete Button - Show only for confirmed bookings */}
+            {booking.status === 'confirmed' && onComplete && (
+              <Button 
+                size="sm"
+                onClick={() => onComplete(booking.booking_id || booking.bookingId)}
+                className="bg-blue-600 hover:bg-blue-700 text-xs h-7"
+                data-testid={`complete-booking-${booking.booking_id}`}
+              >
+                <Check className="w-3 h-3 mr-1" />
+                Complete
+              </Button>
+            )}
+          </div>
         </div>
-        <div className="text-right">
-          <span className={`text-xs px-2 py-0.5 rounded ${
-            booking.status === 'confirmed' ? 'bg-green-100 text-green-700' :
-            booking.status === 'cancelled' ? 'bg-red-100 text-red-700' :
-            booking.status === 'completed' ? 'bg-blue-100 text-blue-700' :
-            'bg-gray-100 text-gray-700'
-          }`}>
-            {booking.status.toUpperCase()}
-          </span>
-        </div>
-      </div>
+      </CardContent>
     </Card>
   );
 }

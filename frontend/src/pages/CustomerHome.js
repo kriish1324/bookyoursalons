@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { auth } from '../firebase';
+import { auth, db } from '../firebase';
+import { collection, query, where, onSnapshot, doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import axios from 'axios';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -88,6 +89,62 @@ function CustomerHome() {
   useEffect(() => {
     const interval = setInterval(checkUpcomingReminders, 60000);
     return () => clearInterval(interval);
+  }, []);
+
+  // REAL-TIME Firestore Listener for Customer Bookings
+  useEffect(() => {
+    const phone = localStorage.getItem('userPhone');
+    if (!phone) return;
+
+    const bookingsRef = collection(db, 'bookings');
+    const q = query(bookingsRef, where('customerPhone', '==', phone));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const realtimeBookings = [];
+      snapshot.forEach((doc) => {
+        realtimeBookings.push({ id: doc.id, ...doc.data() });
+      });
+
+      // Update bookings
+      setBookings(realtimeBookings);
+
+      // Show toast notifications for status changes
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === 'modified') {
+          const booking = change.doc.data();
+          if (booking.status === 'confirmed') {
+            toast.success('Booking Confirmed!', {
+              description: `Your booking at ${booking.salonName || 'salon'} is confirmed`,
+              duration: 5000
+            });
+          } else if (booking.status === 'completed') {
+            toast.success('Service Completed!', {
+              description: `Thank you for visiting ${booking.salonName || 'salon'}`,
+              duration: 5000
+            });
+          } else if (booking.status === 'rejected') {
+            toast.error('Booking Rejected', {
+              description: `Your booking at ${booking.salonName || 'salon'} was rejected`,
+              duration: 5000
+            });
+          }
+        } else if (change.type === 'added') {
+          const booking = change.doc.data();
+          // Only show notification for new bookings (not initial load)
+          if (realtimeBookings.length > 0 && booking.status === 'pending') {
+            toast.info('New Booking', {
+              description: 'Waiting for salon confirmation',
+              duration: 3000
+            });
+          }
+        }
+      });
+    }, (error) => {
+      console.error('Firestore listener error:', error);
+      // Fallback to API if Firestore fails
+    });
+
+    return () => unsubscribe();
   }, []);
 
   const fetchTrendingSalons = async () => {
@@ -441,11 +498,34 @@ function CustomerHome() {
         customer_name: customerName
       });
 
+      const bookingId = response.data.booking_id;
+
+      // Sync to Firestore for real-time updates
+      try {
+        const bookingRef = doc(db, 'bookings', bookingId);
+        await setDoc(bookingRef, {
+          bookingId: bookingId,
+          salonId: selectedSalon.salon_id,
+          salonName: selectedSalon.salon_name || selectedSalon.name || '',
+          customerName: customerName,
+          customerPhone: customerPhone,
+          serviceName: selectedService.name || '',
+          servicePrice: selectedService.price || 0,
+          slotTime: String(selectedSlot),
+          date: formattedDate,
+          status: 'pending',
+          createdAt: serverTimestamp()
+        });
+      } catch (firestoreError) {
+        console.error('Firestore sync error:', firestoreError);
+        // Continue even if Firestore fails
+      }
+
       if (paymentMethod === 'online') {
         try {
           const orderResponse = await axios.post(`${API}/payment/create-order`, {
             amount: selectedService.price,
-            booking_id: response.data.booking_id
+            booking_id: bookingId
           });
 
           const options = {
@@ -1141,59 +1221,108 @@ function CustomerHome() {
               <TabsTrigger value="past">Past</TabsTrigger>
             </TabsList>
             <TabsContent value="upcoming" className="space-y-3 mt-4">
-              {bookings.filter(b => new Date(b.booking_date) >= new Date() && b.status !== 'cancelled' && b.status !== 'completed').length === 0 ? (
+              {bookings.filter(b => {
+                const bookingDate = b.date || b.booking_date;
+                return new Date(bookingDate) >= new Date() && b.status !== 'cancelled' && b.status !== 'completed';
+              }).length === 0 ? (
                 <p className="text-center text-gray-500 py-8">No upcoming bookings</p>
               ) : (
-                bookings.filter(b => new Date(b.booking_date) >= new Date() && b.status !== 'cancelled' && b.status !== 'completed').map((booking) => (
-                  <Card key={booking.booking_id}>
-                    <CardContent className="pt-4">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <p className="font-medium">{booking.salon_name}</p>
-                          <p className="text-sm text-gray-600">{booking.service_name}</p>
-                          <p className="text-sm text-gray-500">{booking.booking_date} at {booking.slot_time}</p>
-                          <p className="text-sm font-medium text-green-600">₹{booking.service_price}</p>
-                          <span className={`text-xs px-2 py-1 rounded mt-2 inline-block ${
-                            booking.status === 'confirmed' ? 'bg-green-100 text-green-700' :
-                            booking.status === 'pending_approval' ? 'bg-yellow-100 text-yellow-700' :
-                            booking.status === 'cancelled' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'
-                          }`}>
-                            {booking.status === 'pending_approval' ? 'AWAITING CONFIRMATION' : booking.status.toUpperCase()}
-                          </span>
+                bookings.filter(b => {
+                  const bookingDate = b.date || b.booking_date;
+                  return new Date(bookingDate) >= new Date() && b.status !== 'cancelled' && b.status !== 'completed';
+                }).map((booking) => {
+                  const getStatusStyles = (status) => {
+                    switch (status) {
+                      case 'pending':
+                        return 'bg-yellow-50 border-yellow-200 text-yellow-700';
+                      case 'confirmed':
+                        return 'bg-green-50 border-green-200 text-green-700';
+                      default:
+                        return 'bg-gray-50 border-gray-200 text-gray-700';
+                    }
+                  };
+
+                  return (
+                    <Card 
+                      key={booking.bookingId || booking.booking_id || booking.id}
+                      className={`border-l-4 ${getStatusStyles(booking.status)}`}
+                      style={{ borderLeftColor: booking.status === 'pending' ? '#facc15' : '#22c55e' }}
+                    >
+                      <CardContent className="pt-4">
+                        <div className="flex justify-between items-start gap-3">
+                          <div className="flex-1">
+                            <p className="font-semibold text-base">{booking.salonName || booking.salon_name}</p>
+                            <p className="text-sm text-gray-700 mt-1">{booking.serviceName || booking.service_name}</p>
+                            <div className="flex items-center gap-2 mt-2 text-sm text-gray-600">
+                              <Calendar className="w-4 h-4" />
+                              <span>{booking.date || booking.booking_date} at {booking.slotTime || booking.slot_time}</span>
+                            </div>
+                            <p className="text-base font-bold text-green-600 mt-2">₹{booking.servicePrice || booking.service_price}</p>
+                            <span className={`text-xs font-medium px-3 py-1 rounded-full mt-2 inline-block ${
+                              booking.status === 'confirmed' ? 'bg-green-100 text-green-700 border border-green-300' :
+                              booking.status === 'pending' ? 'bg-yellow-100 text-yellow-700 border border-yellow-300' :
+                              'bg-gray-100 text-gray-700 border border-gray-300'
+                            }`}>
+                              {booking.status === 'pending' ? '⏳ AWAITING CONFIRMATION' : 
+                               booking.status === 'confirmed' ? '✅ CONFIRMED' : 
+                               booking.status.toUpperCase()}
+                            </span>
+                          </div>
+                          {(booking.status === 'confirmed' || booking.status === 'pending') && (
+                            <Button 
+                              size="sm" 
+                              variant="outline"
+                              className="border-red-300 text-red-600 hover:bg-red-50"
+                              onClick={() => cancelBooking(booking.bookingId || booking.booking_id || booking.id)}
+                            >
+                              <X className="w-4 h-4 mr-1" />
+                              Cancel
+                            </Button>
+                          )}
                         </div>
-                        {(booking.status === 'confirmed' || booking.status === 'pending_approval') && (
-                          <Button size="sm" variant="destructive" onClick={() => cancelBooking(booking.booking_id)}>
-                            Cancel
-                          </Button>
-                        )}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))
+                      </CardContent>
+                    </Card>
+                  );
+                })
               )}
             </TabsContent>
             <TabsContent value="past" className="space-y-3 mt-4">
-              {bookings.filter(b => new Date(b.booking_date) < new Date() || b.status === 'completed').length === 0 ? (
+              {bookings.filter(b => {
+                const bookingDate = b.date || b.booking_date;
+                return new Date(bookingDate) < new Date() || b.status === 'completed';
+              }).length === 0 ? (
                 <p className="text-center text-gray-500 py-8">No past bookings</p>
               ) : (
-                bookings.filter(b => new Date(b.booking_date) < new Date() || b.status === 'completed').map((booking) => (
-                  <Card key={booking.booking_id}>
+                bookings.filter(b => {
+                  const bookingDate = b.date || b.booking_date;
+                  return new Date(bookingDate) < new Date() || b.status === 'completed';
+                }).map((booking) => (
+                  <Card 
+                    key={booking.bookingId || booking.booking_id || booking.id}
+                    className="bg-gray-50 border-l-4 border-l-gray-400"
+                  >
                     <CardContent className="pt-4">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <p className="font-medium">{booking.salon_name}</p>
-                          <p className="text-sm text-gray-600">{booking.service_name}</p>
-                          <p className="text-sm text-gray-500">{booking.booking_date}</p>
-                          <p className="text-sm font-medium text-green-600">₹{booking.service_price}</p>
+                      <div className="flex justify-between items-start gap-3">
+                        <div className="flex-1">
+                          <p className="font-semibold">{booking.salonName || booking.salon_name}</p>
+                          <p className="text-sm text-gray-600">{booking.serviceName || booking.service_name}</p>
+                          <p className="text-sm text-gray-500 mt-1">{booking.date || booking.booking_date}</p>
+                          <p className="text-sm font-medium text-green-600">₹{booking.servicePrice || booking.service_price}</p>
+                          <span className={`text-xs px-2 py-1 rounded-full mt-2 inline-block ${
+                            booking.status === 'completed' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'
+                          }`}>
+                            {booking.status === 'completed' ? '✓ COMPLETED' : booking.status.toUpperCase()}
+                          </span>
                         </div>
                         <Button 
                           size="sm" 
                           variant="outline"
                           onClick={() => {
-                            setSelectedSalon({ salon_id: booking.salon_id, salon_name: booking.salon_name });
+                            setSelectedSalon({ salon_id: booking.salonId || booking.salon_id, salon_name: booking.salonName || booking.salon_name });
                             setShowReviewDialog(true);
                           }}
                         >
+                          <Star className="w-4 h-4 mr-1" />
                           Review
                         </Button>
                       </div>

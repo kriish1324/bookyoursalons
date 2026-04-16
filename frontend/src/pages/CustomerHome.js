@@ -467,6 +467,15 @@ function CustomerHome() {
         return;
       }
 
+      // Handle duplicate booking
+      if (result.duplicate) {
+        toast.info('You already have a booking for this slot');
+        setShowBooking(false);
+        resetBookingForm();
+        setLoading(false);
+        return;
+      }
+
       // Also create in MongoDB for backend compatibility
       try {
         await axios.post(`${API}/booking/create`, {

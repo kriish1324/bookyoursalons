@@ -58,53 +58,88 @@ export const bookSlotWithTransaction = async (salonId, date, time, bookingData) 
     return { success: false, error: 'Invalid booking data' };
   }
   
+  // Idempotency check - prevent duplicate bookings
+  const existingBookingsQuery = query(
+    collection(db, 'bookings'),
+    where('customerPhone', '==', bookingData.customerPhone),
+    where('salonId', '==', salonId),
+    where('date', '==', date),
+    where('slotTime', '==', time),
+    where('status', 'in', ['pending', 'confirmed'])
+  );
+  
+  const existingSnapshot = await getDocs(existingBookingsQuery);
+  if (!existingSnapshot.empty) {
+    const existing = existingSnapshot.docs[0].data();
+    console.log('Duplicate booking prevented:', existing.bookingId);
+    return { success: true, bookingId: existing.bookingId, duplicate: true };
+  }
+  
   const slotId = `${salonId}_${date}_${time}`;
   const slotRef = doc(db, 'slots', slotId);
   const bookingRef = doc(collection(db, 'bookings'));
   
-  try {
-    const result = await runTransaction(db, async (transaction) => {
-      const slotDoc = await transaction.get(slotRef);
-      
-      // Check if slot exists, create if not
-      if (!slotDoc.exists()) {
-        transaction.set(slotRef, {
-          salonId,
-          date,
-          time,
-          isBooked: true,
-          bookedAt: serverTimestamp()
-        });
-      } else {
-        // Check if already booked
-        if (slotDoc.data().isBooked === true) {
-          throw new Error('Slot already booked');
+  // Retry mechanism
+  const maxRetries = 3;
+  let lastError = null;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await runTransaction(db, async (transaction) => {
+        const slotDoc = await transaction.get(slotRef);
+        
+        // Check if slot exists, create if not
+        if (!slotDoc.exists()) {
+          transaction.set(slotRef, {
+            salonId,
+            date,
+            time,
+            isBooked: true,
+            bookedAt: serverTimestamp()
+          });
+        } else {
+          // Check if already booked
+          if (slotDoc.data().isBooked === true) {
+            throw new Error('Slot already booked');
+          }
+          // Mark as booked
+          transaction.update(slotRef, {
+            isBooked: true,
+            bookedAt: serverTimestamp()
+          });
         }
-        // Mark as booked
-        transaction.update(slotRef, {
-          isBooked: true,
-          bookedAt: serverTimestamp()
+        
+        // Create booking
+        transaction.set(bookingRef, {
+          ...bookingData,
+          bookingId: bookingRef.id,
+          slotTime: time,
+          date: date,
+          status: 'pending',
+          createdAt: serverTimestamp()
         });
-      }
-      
-      // Create booking
-      transaction.set(bookingRef, {
-        ...bookingData,
-        bookingId: bookingRef.id,
-        slotTime: time,
-        date: date,
-        status: 'pending',
-        createdAt: serverTimestamp()
+        
+        return bookingRef.id;
       });
       
-      return bookingRef.id;
-    });
-    
-    return { success: true, bookingId: result };
-  } catch (error) {
-    console.error('Booking transaction failed:', error);
-    return { success: false, error: error.message };
+      console.log('Booking created:', result);
+      return { success: true, bookingId: result };
+    } catch (error) {
+      lastError = error;
+      console.warn(`Booking attempt ${attempt} failed:`, error.message);
+      
+      if (error.message === 'Slot already booked') {
+        return { success: false, error: 'Slot already booked' };
+      }
+      
+      if (attempt < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 300 * attempt));
+      }
+    }
   }
+  
+  console.error('Booking failed after retries:', lastError);
+  return { success: false, error: lastError?.message || 'Booking failed' };
 };
 
 /**

@@ -1,0 +1,41 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Bookings collection
+    match /bookings/{bookingId} {
+      // Anyone can read their own bookings
+      allow read: if request.auth != null && 
+                     (resource.data.customerPhone == request.auth.token.phone_number ||
+                      resource.data.salonId == request.auth.uid);
+      
+      // Customers can create bookings
+      allow create: if request.auth != null &&
+                       request.resource.data.customerPhone == request.auth.token.phone_number &&
+                       request.resource.data.status == 'pending';
+      
+      // Salons can update status (confirm/reject/complete)
+      allow update: if request.auth != null &&
+                       (resource.data.salonId == request.auth.uid ||
+                        resource.data.customerPhone == request.auth.token.phone_number);
+      
+      // Only customer can delete their own cancelled bookings
+      allow delete: if request.auth != null &&
+                       resource.data.customerPhone == request.auth.token.phone_number;
+    }
+    
+    // Slots collection
+    match /slots/{slotId} {
+      // Anyone can read slots
+      allow read: if true;
+      
+      // Only authenticated users can write slots (via transactions)
+      allow write: if request.auth != null;
+    }
+    
+    // Default deny all other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

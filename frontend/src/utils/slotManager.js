@@ -50,6 +50,14 @@ export const initializeSlotsForDate = async (salonId, date, openingTime, closing
  * Book a slot with transaction (prevents double booking)
  */
 export const bookSlotWithTransaction = async (salonId, date, time, bookingData) => {
+  // Validation
+  if (!salonId || !date || !time) {
+    return { success: false, error: 'Missing required fields' };
+  }
+  if (!bookingData.customerPhone || !bookingData.salonName) {
+    return { success: false, error: 'Invalid booking data' };
+  }
+  
   const slotId = `${salonId}_${date}_${time}`;
   const slotRef = doc(db, 'slots', slotId);
   const bookingRef = doc(collection(db, 'bookings'));

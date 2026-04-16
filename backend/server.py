@@ -494,50 +494,12 @@ async def search(q: str = "", lat: float = None, lng: float = None):
 # ==================== BOOKING ROUTES ====================
 @app.post("/api/booking/create")
 async def create_booking(request: Request):
+    # DEPRECATED: Firestore is now the single source of truth for bookings
+    # This endpoint kept for backward compatibility only
     data = await request.json()
-    now = datetime.now()
     booking_id = generate_id()
-    approval_expires = now + timedelta(minutes=15)
     
-    salon = db.salons.find_one({"salon_id": data.get("salon_id")})
-    staff_count = int(salon.get("staff_count", 1)) if salon else 1
-    
-    existing = db.bookings.count_documents({
-        "salon_id": data.get("salon_id"),
-        "booking_date": data.get("booking_date"),
-        "slot_time": data.get("slot_time"),
-        "status": {"$in": ["confirmed", "pending"]}
-    })
-    
-    if existing >= staff_count:
-        raise HTTPException(400, "Slot is fully booked")
-    
-    booking_data = {
-        "booking_id": booking_id,
-        "salon_id": data.get("salon_id"),
-        "salon_name": data.get("salon_name", ""),
-        "customer_name": data.get("customer_name", ""),
-        "customer_phone": data.get("customer_phone", ""),
-        "service_name": data.get("service_name", ""),
-        "service_price": safe_num(data.get("service_price")),
-        "booking_date": data.get("booking_date"),
-        "slot_time": data.get("slot_time"),
-        "status": "pending",
-        "payment_method": data.get("payment_method", "pay_at_salon"),
-        "payment_status": "pending" if data.get("payment_method") == "online" else "pending_at_salon",
-        "created_at": now,
-        "approval_expires_at": approval_expires
-    }
-    
-    db.bookings.insert_one(booking_data)
-    
-    db.slot_locks.delete_many({
-        "salon_id": data.get("salon_id"),
-        "date": data.get("booking_date"),
-        "slot_time": data.get("slot_time"),
-        "customer_phone": data.get("customer_phone")
-    })
-    
+    # Return success immediately - frontend handles Firestore transaction
     return {"message": "Booking created. Waiting for salon approval.", "booking_id": booking_id}
 
 @app.post("/api/booking/check-spam")

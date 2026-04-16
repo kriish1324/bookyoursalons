@@ -371,6 +371,8 @@ function CustomerHome() {
     try {
       const formattedDate = date ? new Date(date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
       
+      console.log('🎯 Fetching slots for:', { salonId, date: formattedDate, salon: selectedSalon });
+      
       // Use new slot manager
       const slots = await getAvailableSlots(
         salonId,
@@ -379,9 +381,10 @@ function CustomerHome() {
         selectedSalon.closing_time || '20:00'
       );
       
+      console.log('✅ Fetched slots:', slots);
       setAvailableSlots(slots);
     } catch (error) {
-      console.error('Error fetching slots:', error);
+      console.error('❌ Error fetching slots:', error);
       setAvailableSlots([]);
     }
   };
@@ -407,7 +410,13 @@ function CustomerHome() {
     setSelectedService(service);
     setShowBooking(true);
     setShowSalonDetails(false);
-    if (selectedDate) fetchSlots(salon.salon_id, selectedDate);
+    
+    // Auto-fetch slots for today if no date selected
+    const dateToUse = selectedDate || new Date().toISOString().split('T')[0];
+    if (!selectedDate) setSelectedDate(dateToUse);
+    
+    console.log('🎫 Opening booking dialog, fetching slots for:', dateToUse);
+    fetchSlots(salon.salon_id, dateToUse);
   };
 
   const handleDateChange = (date) => {

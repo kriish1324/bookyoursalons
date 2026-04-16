@@ -146,7 +146,11 @@ export const bookSlotWithTransaction = async (salonId, date, time, bookingData) 
  * Get available slots for a salon and date
  */
 export const getAvailableSlots = async (salonId, date, openingTime, closingTime) => {
+  console.log('📍 getAvailableSlots called:', { salonId, date, openingTime, closingTime });
+  
   const allSlots = generateSlots(openingTime, closingTime);
+  console.log('🕐 Generated slots:', allSlots.length, allSlots.slice(0, 3));
+  
   const slotsRef = collection(db, 'slots');
   const q = query(
     slotsRef,
@@ -157,16 +161,23 @@ export const getAvailableSlots = async (salonId, date, openingTime, closingTime)
   const snapshot = await getDocs(q);
   const bookedTimes = new Set();
   
+  console.log('🔍 Firestore query result:', snapshot.size, 'documents');
+  
   snapshot.forEach(doc => {
+    console.log('📄 Slot doc:', doc.id, doc.data());
     if (doc.data().isBooked) {
       bookedTimes.add(doc.data().time);
     }
   });
   
-  return allSlots.map(time => ({
+  const availableSlots = allSlots.map(time => ({
     time,
     isAvailable: !bookedTimes.has(time)
   }));
+  
+  console.log('✅ Available slots:', availableSlots.filter(s => s.isAvailable).length, '/', allSlots.length);
+  
+  return availableSlots;
 };
 
 /**

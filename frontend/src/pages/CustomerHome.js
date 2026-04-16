@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { auth, db } from '../firebase';
-import { collection, query, where, onSnapshot, doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import axios from 'axios';
+import { getAvailableSlots, bookSlotWithTransaction, releaseSlot } from '../utils/slotManager';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
@@ -366,18 +367,17 @@ function CustomerHome() {
   };
 
   const fetchSlots = async (salonId, date) => {
+    if (!selectedSalon) return;
     try {
-      // Ensure date is in YYYY-MM-DD format
       const formattedDate = date ? new Date(date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
-      const response = await axios.get(`${API}/salon/${salonId}/slots`, { params: { date: formattedDate } });
       
-      // Handle both array and object response formats
-      let slots = [];
-      if (Array.isArray(response.data)) {
-        slots = response.data;
-      } else if (response.data?.available_slots) {
-        slots = Array.isArray(response.data.available_slots) ? response.data.available_slots : [];
-      }
+      // Use new slot manager
+      const slots = await getAvailableSlots(
+        salonId,
+        formattedDate,
+        selectedSalon.opening_time || '09:00',
+        selectedSalon.closing_time || '20:00'
+      );
       
       setAvailableSlots(slots);
     } catch (error) {
@@ -419,44 +419,14 @@ function CustomerHome() {
     if (selectedSalon) fetchSlots(selectedSalon.salon_id, formattedDate);
   };
 
-  // Lock slot when selected to prevent double booking
+  // Select slot (no locking needed, transaction handles it)
   const handleSlotSelect = async (slotTime) => {
     if (!selectedSalon || !selectedDate || !slotTime) return;
     
-    // Ensure slotTime is a string, not an object
     const timeStr = typeof slotTime === 'object' ? (slotTime.time || '') : String(slotTime);
     if (!timeStr) return;
     
-    const phone = localStorage.getItem('userPhone') || '';
-    // Ensure date is in YYYY-MM-DD format
-    const formattedDate = new Date(selectedDate).toISOString().split('T')[0];
-    
-    setLoading(true);
-    try {
-      const response = await axios.post(`${API}/slot/lock`, {
-        salon_id: selectedSalon.salon_id,
-        slot_time: timeStr,
-        date: formattedDate,
-        booking_date: formattedDate,
-        customer_phone: phone
-      });
-      
-      if (response.data.locked) {
-        setSelectedSlot(timeStr);
-        setCurrentLockId(response.data.lock_id || null);
-        toast.success('Slot reserved for 5 minutes');
-      } else {
-        toast.error(response.data.message || 'Slot not available');
-        // Refresh slots to get updated availability
-        fetchSlots(selectedSalon.salon_id, formattedDate);
-      }
-    } catch (error) {
-      console.error('Slot lock error:', error);
-      // Fallback - allow selection anyway for better UX
-      setSelectedSlot(timeStr);
-      toast.info('Slot selected');
-    }
-    setLoading(false);
+    setSelectedSlot(timeStr);
   };
 
   const createBooking = async () => {
@@ -467,97 +437,61 @@ function CustomerHome() {
 
     const customerPhone = localStorage.getItem('userPhone') || '';
     const customerName = localStorage.getItem('userName') || 'Customer';
-    
-    // Ensure date is in YYYY-MM-DD format
     const formattedDate = selectedDate ? new Date(selectedDate).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
-
-    // Backend spam check
-    try {
-      const spamCheck = await axios.post(`${API}/booking/check-spam`, { customer_phone: customerPhone });
-      if (spamCheck.data.is_spam) {
-        toast.error(spamCheck.data.message || 'Too many bookings. Please wait.');
-        return;
-      }
-    } catch (error) {
-      console.error('Spam check error:', error);
-      // Continue with booking even if spam check fails
-    }
 
     setLoading(true);
     try {
-      const response = await axios.post(`${API}/booking/create`, {
-        salon_id: selectedSalon.salon_id,
-        salon_name: selectedSalon.salon_name || selectedSalon.name || '',
-        service_id: selectedService.id || '',
-        service_name: selectedService.name || '',
-        service_price: selectedService.price || 0,
-        slot_time: String(selectedSlot), // Ensure slot_time is a string
-        booking_date: formattedDate,
-        payment_method: paymentMethod,
-        customer_phone: customerPhone,
-        customer_name: customerName
-      });
+      // Use Firestore transaction for slot booking
+      const bookingData = {
+        salonId: selectedSalon.salon_id,
+        salonName: selectedSalon.salon_name || selectedSalon.name || '',
+        customerName: customerName,
+        customerPhone: customerPhone,
+        serviceName: selectedService.name || '',
+        servicePrice: selectedService.price || 0,
+        paymentMethod: paymentMethod
+      };
 
-      const bookingId = response.data.booking_id;
+      const result = await bookSlotWithTransaction(
+        selectedSalon.salon_id,
+        formattedDate,
+        selectedSlot,
+        bookingData
+      );
 
-      // Sync to Firestore for real-time updates
+      if (!result.success) {
+        toast.error(result.error || 'Slot already booked. Please select another slot.');
+        // Refresh slots
+        fetchSlots(selectedSalon.salon_id, formattedDate);
+        setLoading(false);
+        return;
+      }
+
+      // Also create in MongoDB for backend compatibility
       try {
-        const bookingRef = doc(db, 'bookings', bookingId);
-        await setDoc(bookingRef, {
-          bookingId: bookingId,
-          salonId: selectedSalon.salon_id,
-          salonName: selectedSalon.salon_name || selectedSalon.name || '',
-          customerName: customerName,
-          customerPhone: customerPhone,
-          serviceName: selectedService.name || '',
-          servicePrice: selectedService.price || 0,
-          slotTime: String(selectedSlot),
-          date: formattedDate,
-          status: 'pending',
-          createdAt: serverTimestamp()
+        await axios.post(`${API}/booking/create`, {
+          salon_id: selectedSalon.salon_id,
+          salon_name: selectedSalon.salon_name || selectedSalon.name || '',
+          service_id: selectedService.id || '',
+          service_name: selectedService.name || '',
+          service_price: selectedService.price || 0,
+          slot_time: String(selectedSlot),
+          booking_date: formattedDate,
+          payment_method: paymentMethod,
+          customer_phone: customerPhone,
+          customer_name: customerName
         });
-      } catch (firestoreError) {
-        console.error('Firestore sync error:', firestoreError);
-        // Continue even if Firestore fails
+      } catch (apiError) {
+        console.error('MongoDB sync error:', apiError);
+        // Continue even if MongoDB fails
       }
 
-      if (paymentMethod === 'online') {
-        try {
-          const orderResponse = await axios.post(`${API}/payment/create-order`, {
-            amount: selectedService.price,
-            booking_id: bookingId
-          });
-
-          const options = {
-            key: process.env.REACT_APP_RAZORPAY_KEY_ID,
-            amount: orderResponse.data.amount,
-            currency: 'INR',
-            order_id: orderResponse.data.id,
-            handler: async (paymentResponse) => {
-              await axios.post(`${API}/payment/verify`, paymentResponse);
-              toast.success('Booking confirmed & payment successful!');
-              setShowBooking(false);
-              resetBookingForm();
-            },
-            prefill: { contact: customerPhone }
-          };
-
-          const razorpay = new window.Razorpay(options);
-          razorpay.open();
-        } catch (paymentError) {
-          console.error('Payment error:', paymentError);
-          toast.success('Booking created! Payment will be at salon.');
-          setShowBooking(false);
-          resetBookingForm();
-        }
-      } else {
-        toast.success('Booking request sent! Wait for salon confirmation.');
-        setShowBooking(false);
-        resetBookingForm();
-      }
+      toast.success('Booking confirmed! Waiting for salon approval.');
+      setShowBooking(false);
+      resetBookingForm();
     } catch (error) {
       console.error('Error creating booking:', error);
-      toast.error(error.response?.data?.error || error.response?.data?.detail || 'Failed to create booking');
+      toast.error(error.message || 'Failed to create booking');
     }
     setLoading(false);
   };
@@ -590,7 +524,27 @@ function CustomerHome() {
 
   const cancelBooking = async (bookingId) => {
     try {
+      // Find booking to get slot info
+      const booking = bookings.find(b => 
+        (b.bookingId === bookingId || b.booking_id === bookingId || b.id === bookingId)
+      );
+      
+      // Release slot in Firestore
+      if (booking) {
+        await releaseSlot(
+          booking.salonId || booking.salon_id,
+          booking.date || booking.booking_date,
+          booking.slotTime || booking.slot_time
+        );
+      }
+      
+      // Cancel in MongoDB
       await axios.patch(`${API}/booking/${bookingId}/cancel`);
+      
+      // Update Firestore booking status
+      const bookingRef = doc(db, 'bookings', bookingId);
+      await updateDoc(bookingRef, { status: 'cancelled' });
+      
       toast.success('Booking cancelled');
       fetchBookings();
     } catch (error) {
@@ -1154,13 +1108,8 @@ function CustomerHome() {
                     <p className="col-span-4 text-center text-sm text-gray-500 py-4">No slots available</p>
                   ) : (
                     availableSlots.map((slot) => {
-                      // Handle both string and object slot formats
-                      const slotTime = typeof slot === 'object' ? (slot.time || '') : slot;
-                      const isAvailable = typeof slot === 'object' ? (slot.available > 0) : true;
-                      const availableCount = typeof slot === 'object' ? slot.available : 1;
-                      const totalCount = typeof slot === 'object' ? slot.total : 1;
-                      
-                      if (!slotTime) return null;
+                      const slotTime = slot.time;
+                      const isAvailable = slot.isAvailable;
                       
                       return (
                         <Button
@@ -1170,7 +1119,6 @@ function CustomerHome() {
                           onClick={() => isAvailable && handleSlotSelect(slotTime)}
                           className={`text-xs ${!isAvailable ? 'opacity-50 cursor-not-allowed' : ''}`}
                           disabled={!isAvailable}
-                          title={isAvailable ? `${availableCount}/${totalCount} available` : 'Fully booked'}
                         >
                           {slotTime}
                           {!isAvailable && <span className="ml-1 text-red-500">✗</span>}

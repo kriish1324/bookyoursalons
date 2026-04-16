@@ -4,6 +4,7 @@ import { auth, db } from '../firebase';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, query, where, onSnapshot, doc, updateDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import axios from 'axios';
+import { releaseSlot } from '../utils/slotManager';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
@@ -407,6 +408,9 @@ function SalonDashboard() {
 
   const handleRejectBooking = async (bookingId, reason = 'Salon unavailable') => {
     try {
+      // Find booking to release slot
+      const booking = bookings.find(b => b.booking_id === bookingId);
+      
       // Update MongoDB via API
       await axios.post(`${API}/booking/${bookingId}/reject?reason=${encodeURIComponent(reason)}`);
       
@@ -417,6 +421,15 @@ function SalonDashboard() {
         rejectionReason: reason,
         rejectedAt: serverTimestamp()
       });
+      
+      // Release slot
+      if (booking) {
+        await releaseSlot(
+          booking.salon_id || booking.salonId,
+          booking.booking_date || booking.date,
+          booking.slot_time || booking.slotTime
+        );
+      }
       
       toast.success('Booking Rejected');
       fetchSalonData();

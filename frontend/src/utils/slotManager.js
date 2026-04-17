@@ -86,7 +86,7 @@ export const bookSlotWithTransaction = async (salonId, date, time, bookingData) 
   }
   
   const slotId = `${salonId}_${date}_${time}`;
-  const slotRef = doc(db, 'slots', slotId);
+  const slotRef = doc(db, 'slot_locks', slotId);
   const bookingRef = doc(collection(db, 'bookings'));
   
   // Retry mechanism
@@ -101,21 +101,20 @@ export const bookSlotWithTransaction = async (salonId, date, time, bookingData) 
         // Check if slot exists, create if not
         if (!slotDoc.exists()) {
           transaction.set(slotRef, {
-            salonId,
-            date,
-            time,
-            isBooked: true,
-            bookedAt: serverTimestamp()
+            salon_id: salonId,
+            booking_date: date,
+            slot_time: time,
+            is_locked: true,
+            locked_at: serverTimestamp()
           });
         } else {
           // Check if already booked
-          if (slotDoc.data().isBooked === true) {
+          if (slotDoc.data().is_locked === true) {
             throw new Error('Slot already booked');
           }
-          // Mark as booked
           transaction.update(slotRef, {
-            isBooked: true,
-            bookedAt: serverTimestamp()
+            is_locked: true,
+            locked_at: serverTimestamp()
           });
         }
         
@@ -164,11 +163,11 @@ export const getAvailableSlots = async (salonId, date, openingTime, closingTime)
   
   // Fetch booked slots from Firestore (works for both auth and anonymous)
   try {
-    const slotsRef = collection(db, 'slots');
+    const slotsRef = collection(db, 'slot_locks');
     const q = query(
       slotsRef,
-      where('salonId', '==', salonId),
-      where('date', '==', date)
+      where('salon_id', '==', salonId),
+      where('booking_date', '==', date)
     );
     
     const snapshot = await getDocs(q);
@@ -178,8 +177,8 @@ export const getAvailableSlots = async (salonId, date, openingTime, closingTime)
     
     snapshot.forEach(doc => {
       console.log('📄 Slot doc:', doc.id, doc.data());
-      if (doc.data().isBooked) {
-        bookedTimes.add(doc.data().time);
+      if (doc.data().is_locked) {
+        bookedTimes.add(doc.data().slot_time);
       }
     });
     
@@ -202,15 +201,15 @@ export const getAvailableSlots = async (salonId, date, openingTime, closingTime)
  */
 export const releaseSlot = async (salonId, date, time) => {
   const slotId = `${salonId}_${date}_${time}`;
-  const slotRef = doc(db, 'slots', slotId);
+  const slotRef = doc(db, 'slot_locks', slotId);
   
   try {
     await runTransaction(db, async (transaction) => {
       const slotDoc = await transaction.get(slotRef);
       if (slotDoc.exists()) {
         transaction.update(slotRef, {
-          isBooked: false,
-          releasedAt: serverTimestamp()
+          is_locked: false,
+          released_at: serverTimestamp()
         });
       }
     });

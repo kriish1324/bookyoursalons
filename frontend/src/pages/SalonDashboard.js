@@ -128,10 +128,12 @@ function SalonDashboard() {
       setPendingBookings(pending);
 
       // Show toast notification for new bookings
+      let hasNewBookings = false;
       snapshot.docChanges().forEach((change) => {
         if (change.type === 'added') {
           const booking = change.doc.data();
           if (booking.status === 'pending') {
+            hasNewBookings = true;
             toast.info(`New Booking from ${booking.customerName || 'Customer'}`, {
               description: `${booking.serviceName} at ${booking.slotTime}`,
               duration: 5000
@@ -146,6 +148,13 @@ function SalonDashboard() {
           }
         }
       });
+      
+      // Play alert sound for new bookings
+      if (hasNewBookings && document.visibilityState === 'visible') {
+        const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBjWK0fPTgjMGHm7A7+OZUA0PVqzn77BdGAg+ltryxm8gBi6Dye/glkgLEmG56+mjUxELTKXh8bllHAU2jdXzzH0pBSd+zPDajzsIGGS86Oihkg==');
+        audio.volume = 0.3;
+        audio.play().catch(() => {});
+      }
     }, (error) => {
       console.error('Firestore listener error:', error);
       // Fallback to API polling if Firestore fails
@@ -1674,7 +1683,7 @@ function BookingCard({ booking, onComplete }) {
         booking.status === 'confirmed' ? '#22c55e' : 
         booking.status === 'completed' ? '#9ca3af' : '#ef4444' 
       }}
-      data-testid={`booking-card-${booking.booking_id}`}
+      data-testid={`booking-card-${booking.booking_id || booking.bookingId}`}
     >
       <CardContent className="p-4">
         <div className="flex justify-between items-start gap-3">

@@ -4,17 +4,12 @@ service cloud.firestore {
     
     // Bookings collection
     match /bookings/{bookingId} {
-      // Allow read for authenticated users viewing their own bookings
+      allow list: if request.auth != null;
+      allow get: if request.auth != null;
       allow read: if request.auth != null;
-      
-      // Customers can create bookings
       allow create: if request.auth != null ||
                        request.resource.data.status == 'pending';
-      
-      // Allow updates for status changes
       allow update: if request.auth != null;
-      
-      // Allow delete for cancellations
       allow delete: if request.auth != null;
     }
     

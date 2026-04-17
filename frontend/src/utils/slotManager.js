@@ -102,7 +102,7 @@ export const bookSlotWithTransaction = async (salonId, date, time, bookingData) 
         if (!slotDoc.exists()) {
           transaction.set(slotRef, {
             salon_id: salonId,
-            booking_date: date,
+            date: date,
             slot_time: time,
             is_locked: true,
             locked_at: serverTimestamp()
@@ -167,7 +167,7 @@ export const getAvailableSlots = async (salonId, date, openingTime, closingTime)
     const q = query(
       slotsRef,
       where('salon_id', '==', salonId),
-      where('booking_date', '==', date)
+      where('date', '==', date)
     );
     
     const snapshot = await getDocs(q);

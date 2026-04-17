@@ -94,11 +94,10 @@ function CustomerHome() {
 
   // REAL-TIME Firestore Listener for Customer Bookings
   useEffect(() => {
-    const phone = localStorage.getItem('userPhone');
-    if (!phone) return;
+    if (!auth.currentUser?.phoneNumber) return;
 
     const bookingsRef = collection(db, 'bookings');
-    const q = query(bookingsRef, where('customer_phone', '==', phone));
+    const q = query(bookingsRef, where('customer_phone', '==', auth.currentUser.phoneNumber.replace('+91', '')));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const realtimeBookings = [];

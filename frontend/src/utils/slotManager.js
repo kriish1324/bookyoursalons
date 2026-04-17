@@ -52,6 +52,10 @@ export const initializeSlotsForDate = async (salonId, date, openingTime, closing
 export const bookSlotWithTransaction = async (salonId, date, time, bookingData) => {
   console.log('🎫 Booking transaction started:', { salonId, date, time, auth: auth.currentUser ? 'Yes' : 'No' });
   
+  if (!auth.currentUser) {
+    return { success: false, error: 'Please login to book a slot' };
+  }
+  
   // Validation
   if (!salonId || !date || !time) {
     return { success: false, error: 'Missing required fields' };
@@ -188,9 +192,8 @@ export const getAvailableSlots = async (salonId, date, openingTime, closingTime)
     
     return availableSlots;
   } catch (error) {
-    console.error('❌ Firestore error (falling back to all slots available):', error);
-    // Fallback: return all slots as available if Firestore fails
-    return allSlots.map(time => ({ time, isAvailable: true }));
+    console.error('❌ Firestore error:', error);
+    throw error;
   }
 };
 

@@ -98,7 +98,7 @@ function CustomerHome() {
     if (!phone) return;
 
     const bookingsRef = collection(db, 'bookings');
-    const q = query(bookingsRef, where('customerPhone', '==', phone));
+    const q = query(bookingsRef, where('customer_phone', '==', phone));
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const realtimeBookings = [];

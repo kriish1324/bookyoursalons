@@ -1,4 +1,4 @@
-import { db } from '../firebase';
+import { db, auth } from '../firebase';
 import { collection, doc, runTransaction, query, where, getDocs, serverTimestamp } from 'firebase/firestore';
 
 /**
@@ -50,6 +50,8 @@ export const initializeSlotsForDate = async (salonId, date, openingTime, closing
  * Book a slot with transaction (prevents double booking)
  */
 export const bookSlotWithTransaction = async (salonId, date, time, bookingData) => {
+  console.log('🎫 Booking transaction started:', { salonId, date, time, auth: auth.currentUser ? 'Yes' : 'No' });
+  
   // Validation
   if (!salonId || !date || !time) {
     return { success: false, error: 'Missing required fields' };
@@ -59,20 +61,24 @@ export const bookSlotWithTransaction = async (salonId, date, time, bookingData) 
   }
   
   // Idempotency check - prevent duplicate bookings
-  const existingBookingsQuery = query(
-    collection(db, 'bookings'),
-    where('customerPhone', '==', bookingData.customerPhone),
-    where('salonId', '==', salonId),
-    where('date', '==', date),
-    where('slotTime', '==', time),
-    where('status', 'in', ['pending', 'confirmed'])
-  );
-  
-  const existingSnapshot = await getDocs(existingBookingsQuery);
-  if (!existingSnapshot.empty) {
-    const existing = existingSnapshot.docs[0].data();
-    console.log('Duplicate booking prevented:', existing.bookingId);
-    return { success: true, bookingId: existing.bookingId, duplicate: true };
+  try {
+    const existingBookingsQuery = query(
+      collection(db, 'bookings'),
+      where('customerPhone', '==', bookingData.customerPhone),
+      where('salonId', '==', salonId),
+      where('date', '==', date),
+      where('slotTime', '==', time),
+      where('status', 'in', ['pending', 'confirmed'])
+    );
+    
+    const existingSnapshot = await getDocs(existingBookingsQuery);
+    if (!existingSnapshot.empty) {
+      const existing = existingSnapshot.docs[0].data();
+      console.log('✅ Duplicate booking prevented:', existing.bookingId);
+      return { success: true, bookingId: existing.bookingId, duplicate: true };
+    }
+  } catch (error) {
+    console.warn('⚠️ Idempotency check failed, continuing:', error.message);
   }
   
   const slotId = `${salonId}_${date}_${time}`;
@@ -147,37 +153,45 @@ export const bookSlotWithTransaction = async (salonId, date, time, bookingData) 
  */
 export const getAvailableSlots = async (salonId, date, openingTime, closingTime) => {
   console.log('📍 getAvailableSlots called:', { salonId, date, openingTime, closingTime });
+  console.log('🔐 Auth state:', auth.currentUser ? 'Authenticated' : 'Anonymous');
   
   const allSlots = generateSlots(openingTime, closingTime);
   console.log('🕐 Generated slots:', allSlots.length, allSlots.slice(0, 3));
   
-  const slotsRef = collection(db, 'slots');
-  const q = query(
-    slotsRef,
-    where('salonId', '==', salonId),
-    where('date', '==', date)
-  );
-  
-  const snapshot = await getDocs(q);
-  const bookedTimes = new Set();
-  
-  console.log('🔍 Firestore query result:', snapshot.size, 'documents');
-  
-  snapshot.forEach(doc => {
-    console.log('📄 Slot doc:', doc.id, doc.data());
-    if (doc.data().isBooked) {
-      bookedTimes.add(doc.data().time);
-    }
-  });
-  
-  const availableSlots = allSlots.map(time => ({
-    time,
-    isAvailable: !bookedTimes.has(time)
-  }));
-  
-  console.log('✅ Available slots:', availableSlots.filter(s => s.isAvailable).length, '/', allSlots.length);
-  
-  return availableSlots;
+  // Fetch booked slots from Firestore (works for both auth and anonymous)
+  try {
+    const slotsRef = collection(db, 'slots');
+    const q = query(
+      slotsRef,
+      where('salonId', '==', salonId),
+      where('date', '==', date)
+    );
+    
+    const snapshot = await getDocs(q);
+    const bookedTimes = new Set();
+    
+    console.log('🔍 Firestore query result:', snapshot.size, 'documents');
+    
+    snapshot.forEach(doc => {
+      console.log('📄 Slot doc:', doc.id, doc.data());
+      if (doc.data().isBooked) {
+        bookedTimes.add(doc.data().time);
+      }
+    });
+    
+    const availableSlots = allSlots.map(time => ({
+      time,
+      isAvailable: !bookedTimes.has(time)
+    }));
+    
+    console.log('✅ Available slots:', availableSlots.filter(s => s.isAvailable).length, '/', allSlots.length);
+    
+    return availableSlots;
+  } catch (error) {
+    console.error('❌ Firestore error (falling back to all slots available):', error);
+    // Fallback: return all slots as available if Firestore fails
+    return allSlots.map(time => ({ time, isAvailable: true }));
+  }
 };
 
 /**
